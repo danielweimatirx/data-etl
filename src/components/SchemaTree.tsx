@@ -9,10 +9,10 @@ export default function SchemaTree() {
   const [panelOpen, setPanelOpen] = useState(false);
 
   useEffect(() => {
-    if (connectionString && tree.length === 0 && !loading) {
+    if (connectionString && tree.length === 0 && !loading && !error) {
       fetchTree(connectionString);
     }
-  }, [connectionString, tree.length, loading, fetchTree]);
+  }, [connectionString, tree.length, loading, error, fetchTree]);
 
   // 计算已选库的摘要
   const selectedSummary = useMemo(() => {
