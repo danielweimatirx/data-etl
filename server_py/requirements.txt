@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+aiomysql
+langgraph
+langchain-core
+langchain-openai
+python-dotenv
+openai
+httpx
+pydantic
+pytest
+pytest-asyncio
+hypothesis

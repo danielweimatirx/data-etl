@@ -1,0 +1,23 @@
+from openai import AsyncOpenAI
+from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+
+_client = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+
+
+async def call_llm(messages: list, temperature: float, max_tokens: int) -> dict:
+    """
+    统一的 LLM API 调用（OpenAI 兼容接口）。
+    返回 {"ok": bool, "content": str, "error": str}
+    """
+    try:
+        response = await _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=False,
+        )
+        content = response.choices[0].message.content
+        return {"ok": True, "content": content, "error": ""}
+    except Exception as e:
+        return {"ok": False, "content": "", "error": str(e)}
