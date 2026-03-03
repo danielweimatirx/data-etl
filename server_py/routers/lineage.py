@@ -105,7 +105,7 @@ async def lineage(request_body: dict):
             max_tokens=4096,
         )
         if not llm_result['ok']:
-            return JSONResponse(status_code=500, content={"error": llm_result['error'] or "\u8840\u7f18\u5206\u6790\u5931\u8d25"})
+            return JSONResponse(status_code=llm_result.get('status', 500), content={"error": llm_result['error'] or "\u8840\u7f18\u5206\u6790\u5931\u8d25"})
 
         content = (llm_result.get('content') or '').strip()
         json_match = re.search(r'\{[\s\S]*\}', content)
@@ -269,7 +269,7 @@ async def metric_lineage(request_body: dict):
             max_tokens=4096,
         )
         if not llm_result['ok']:
-            return JSONResponse(status_code=500, content={"error": llm_result['error'] or "\u6307\u6807\u8840\u7f18\u5206\u6790\u5931\u8d25"})
+            return JSONResponse(status_code=llm_result.get('status', 500), content={"error": llm_result['error'] or "\u6307\u6807\u8840\u7f18\u5206\u6790\u5931\u8d25"})
 
         content = (llm_result.get('content') or '').strip()
         json_match = re.search(r'\{[\s\S]*\}', content)

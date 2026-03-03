@@ -48,7 +48,7 @@ async def get_mysql_connection(connection_string):
                 port=parsed['port'],
                 user=parsed['user'],
                 password=parsed['password'],
-                db=parsed.get('database') or '',
+                db=parsed.get('database') or None,
                 connect_timeout=10,
             ),
             timeout=10,

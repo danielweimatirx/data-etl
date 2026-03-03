@@ -89,7 +89,7 @@ async def mapping(request_body: dict):
     try:
         result = await call_llm(chat_messages, temperature=0.2, max_tokens=4096)
         if not result['ok']:
-            return JSONResponse(status_code=500, content={"error": result['error'] or "DeepSeek 请求失败"})
+            return JSONResponse(status_code=result.get('status', 500), content={"error": result['error'] or "DeepSeek 请求失败"})
 
         content = (result.get('content') or '').strip()
         parsed = {'mappings': []}

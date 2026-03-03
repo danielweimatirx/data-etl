@@ -374,8 +374,8 @@ async def build_prompt_and_call_llm_node(state: MetricChatState) -> dict:
     if not result.get('ok'):
         return {
             'llm_response': {
-                'reply': '',
-                'error': result.get('error') or '指标对话失败',
+                '_error': result.get('error') or '指标对话失败',
+                '_status': result.get('status', 500),
             },
         }
 

@@ -33,6 +33,9 @@ async def chat(request_body: dict):
         }
         result = await graph.ainvoke(initial_state)
         response = result.get('llm_response', {})
+        if '_error' in response:
+            status = response.get('_status', 500)
+            return JSONResponse(status_code=status, content={"error": response['_error']})
         return response
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e) or "DeepSeek 请求失败"})

@@ -50,7 +50,7 @@ async def metric_match(request_body: dict):
             max_tokens=1024,
         )
         if not result['ok']:
-            return JSONResponse(status_code=500, content={"error": result['error'] or "匹配失败"})
+            return JSONResponse(status_code=result.get('status', 500), content={"error": result['error'] or "匹配失败"})
 
         content = (result.get('content') or '').strip()
         json_match = re.search(r'\{[\s\S]*\}', content)
@@ -196,7 +196,7 @@ async def metric_generate(request_body: dict):
         for attempt in range(MAX_RETRIES):
             result = await call_llm(chat_messages, temperature=0.2, max_tokens=2048)
             if not result['ok']:
-                return JSONResponse(status_code=500, content={"error": result['error'] or "生成失败"})
+                return JSONResponse(status_code=result.get('status', 500), content={"error": result['error'] or "生成失败"})
 
             content = (result.get('content') or '').strip()
             json_match = re.search(r'\{[\s\S]*\}', content)

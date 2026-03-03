@@ -547,10 +547,8 @@ async def build_prompt_and_call_llm_node(state: dict) -> dict:
         if not result.get("ok"):
             return {
                 "llm_response": {
-                    "reply": result.get("error") or "LLM 请求失败",
-                    "connectionReceived": False,
-                    "connectionTestOk": connection_test_ok,
-                    "currentStep": current_step_hint or 1,
+                    "_error": result.get("error") or "LLM 请求失败",
+                    "_status": result.get("status", 500),
                 }
             }
 
@@ -587,10 +585,8 @@ async def build_prompt_and_call_llm_node(state: dict) -> dict:
     except Exception as e:
         return {
             "llm_response": {
-                "reply": str(e) or "LLM 请求失败",
-                "connectionReceived": False,
-                "connectionTestOk": connection_test_ok,
-                "currentStep": current_step_hint or 1,
+                "_error": str(e) or "LLM 请求失败",
+                "_status": 500,
             }
         }
 

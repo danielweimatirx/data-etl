@@ -16,12 +16,10 @@ async def debug_deepseek():
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": "Say hello in one word."},
             ],
-            temperature=0.7,
-            max_tokens=100,
         )
         if result['ok']:
             return {"ok": True, "reply": result['content']}
         else:
-            return {"ok": False, "error": result['error']}
+            return {"ok": False, "status": result.get('status'), "body": result['error']}
     except Exception as e:
         return {"ok": False, "error": str(e), "code": getattr(e, 'code', None)}

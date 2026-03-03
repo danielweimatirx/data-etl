@@ -53,7 +53,7 @@ async def generate_dml(request_body: dict):
             max_tokens=4096,
         )
         if not result['ok']:
-            return JSONResponse(status_code=500, content={"error": result['error'] or "DeepSeek 请求失败"})
+            return JSONResponse(status_code=result.get('status', 500), content={"error": result['error'] or "DeepSeek 请求失败"})
 
         content = (result.get('content') or '').strip()
         dml = re.sub(r'^```\w*\n?|```\s*$', '', content).strip()
@@ -83,7 +83,7 @@ async def optimize_dml(request_body: dict):
             max_tokens=4096,
         )
         if not result['ok']:
-            return JSONResponse(status_code=500, content={"error": result['error'] or "DeepSeek 请求失败"})
+            return JSONResponse(status_code=result.get('status', 500), content={"error": result['error'] or "DeepSeek 请求失败"})
 
         content = (result.get('content') or '').strip()
         optimized = re.sub(r'^```\w*\n?|```\s*$', '', content).strip()
