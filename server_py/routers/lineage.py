@@ -61,10 +61,11 @@ def _extract_join_relations(sql: str) -> list[dict]:
     relations = []
     # 匹配 JOIN ... ON ... 模式
     join_pattern = re.compile(
-        r'(LEFT\s+|RIGHT\s+|INNER\s+|CROSS\s+|FULL\s+)?JOIN\s+'
+        r'((?:LEFT|RIGHT|INNER|CROSS|FULL)\s+)?JOIN\s+'
         r'(?:`([^`]+)`\.`([^`]+)`|([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)|`([^`]+)`|([a-zA-Z0-9_]+))'
-        r'(?:\s+(?:AS\s+)?(\w+))?'
-        r'(?:\s+ON\s+(.+?))?(?=\s+(?:LEFT|RIGHT|INNER|CROSS|FULL|JOIN|WHERE|GROUP|ORDER|LIMIT|HAVING|UNION|$))',
+        r'(?:\s+(?:AS\s+)?([a-zA-Z0-9_]+))?'
+        r'(?:\s+ON\s+(.+?))?'
+        r'(?=\s+(?:LEFT|RIGHT|INNER|CROSS|FULL|JOIN|WHERE|GROUP|ORDER|LIMIT|HAVING|UNION|\Z))',
         re.IGNORECASE | re.DOTALL,
     )
     for m in join_pattern.finditer(sql):
@@ -87,7 +88,7 @@ def _extract_join_relations(sql: str) -> list[dict]:
 def _extract_sql_clause(sql: str, keyword: str) -> str:
     """提取 SQL 中指定子句（GROUP BY / WHERE / HAVING）"""
     pattern = re.compile(
-        rf'{keyword}\s+(.+?)(?=\s+(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|UNION|$))',
+        rf'{keyword}\s+(.+?)(?=\s+(?:HAVING|ORDER\s+BY|LIMIT|UNION)|$)',
         re.IGNORECASE | re.DOTALL,
     )
     m = pattern.search(sql)
@@ -315,12 +316,15 @@ async def lineage(request_body: dict):
     if not sql:
         return JSONResponse(status_code=400, content={"error": "Missing sql"})
 
-    # ★ 有结构化数据时直接构建，跳过 LLM
+    # ★ 有结构化数据时优先直接构建，结果不完整则回退 LLM
     if isinstance(field_mappings, list) and len(field_mappings) > 0:
         result = _build_lineage_from_structured_data(
             sql, target_table or '', field_mappings, source_tables or [],
         )
-        return result
+        # 验证：至少有源表和字段映射才算有效
+        if result.get('sourceTables') and result.get('fieldMappings'):
+            return result
+        # 否则继续走 LLM 回退
 
     if not LLM_API_KEY:
         return JSONResponse(status_code=503, content={"error": "DEEPSEEK_API_KEY not configured"})
@@ -537,16 +541,22 @@ async def metric_lineage(request_body: dict):
     metric_aggregation = metric_def.get('aggregation', '')
     metric_measure_field = metric_def.get('measureField', '')
 
-    # ★ 有结构化数据 或 无加工表（直接基于原始表）时，直接构建，跳过 LLM
+    # ★ 有结构化数据 或 无加工表时，优先直接构建，结果不完整则回退 LLM
     has_structured = any(
         isinstance(pt.get('fieldMappings'), list) and len(pt['fieldMappings']) > 0
         for pt in relevant_processed
     )
     no_processed = len(relevant_processed) == 0
     if has_structured or unique_sources or no_processed:
-        return _build_metric_lineage_from_data(
+        result = _build_metric_lineage_from_data(
             metric_def, relevant_processed, unique_sources, processed_table_names,
         )
+        # 验证：至少 source 或 processed 层有表才算有效
+        source_ok = any(t.get('tables') for t in result.get('layers', []) if t.get('level') == 'source')
+        processed_ok = any(t.get('tables') for t in result.get('layers', []) if t.get('level') == 'processed')
+        if source_ok or processed_ok or no_processed:
+            return result
+        # 否则继续走 LLM 回退
 
     # 构建业务表名列表（用于在 prompt 中明确哪些是业务表）
     processed_names_list = ', '.join(processed_table_names) if processed_table_names else '（无）'
