@@ -47,13 +47,28 @@ npm run dev          # 前端 Vite 开发服务器
 
 ### Python 版后端
 
-> 需要 Python 3.12+，基于 FastAPI + LangGraph 构建，支持 LLM Tool Calling 模式。
+> 需要 Python 3.12+，基于 FastAPI + LangGraph 构建，支持 LLM Tool Calling 模式。使用 [uv](https://docs.astral.sh/uv/) 管理依赖。
+
+#### 0. 安装 uv（如未安装）
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# 或通过 Homebrew（macOS）
+brew install uv
+```
+
+安装完成后运行 `uv --version` 验证。
 
 #### 1. 安装依赖
 
 ```bash
 cd server_py
-pip install -r requirements.txt
+uv sync
 ```
 
 #### 2. 配置环境变量
@@ -61,16 +76,17 @@ pip install -r requirements.txt
 在 `server_py/` 目录下创建 `.env`：
 
 ```
-LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_MODEL=deepseek-chat
+LLM_API_KEY=your_api_key                                      # LLM API 密钥
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1/  # LLM API 地址（OpenAI 兼容接口）
+LLM_MODEL=qwen3-max                                           # 模型名称
+PORT=3001                                                      # 服务端口，默认 3001
 ```
 
 #### 3. 启动
 
 ```bash
 cd server_py
-python -m server_py.main   # 默认 http://localhost:3000
+uv run python -m server_py.main   # 默认 http://localhost:3000
 ```
 
 ### 前端
