@@ -32,6 +32,7 @@ async def call_llm(
         kwargs["max_tokens"] = max_tokens
     if tools:
         kwargs["tools"] = tools
+        kwargs["parallel_tool_calls"] = True
         # qwen3 thinking 模式与 tool calling 冲突，需关闭
         kwargs["extra_body"] = {"enable_thinking": False}
 

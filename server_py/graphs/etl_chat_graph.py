@@ -1,5 +1,6 @@
 """ETL conversation LangGraph state graph (tool calling 版本)."""
 
+import asyncio
 import json
 import logging
 import re
@@ -164,7 +165,7 @@ async def tool_calling_loop_node(state: dict) -> dict:
 
     system_prompt = f"""你是智能数据 ETL 助手，帮助用户通过对话完成完整的 ETL 流程。
 {selected_tables_note}
-**你有一个工具 `execute_sql`**，可以在用户的 MySQL 数据库上执行任意 SQL。需要查数据、建库、建表、写入数据时，直接调用工具执行 SQL 即可。你可以多次调用工具来完成多步操作（如先建库再建表）。
+**你有一个工具 `execute_sql`**，可以在用户的 MySQL 数据库上执行任意 SQL。需要查数据、建库、建表、写入数据时，直接调用工具执行 SQL 即可。你可以多次调用工具来完成多步操作（如先建库再建表）。**当有多条互相独立的 SQL 需要执行时（如同时查看多张表的结构、同时预览多张表的数据），你应该在同一轮回复中同时调用多次工具，系统会并行执行，大幅提升效率。**
 
 **步骤自动判断**：ETL 流程有 6 步：1-连接数据库、2-选择基表、3-定义目标表、4-字段映射、5-数据验证、6-异常溯源。
 你需要根据**对话上下文**自动判断当前处于哪一步（currentStep 字段，1～6），并在回复中自然引导用户完成当前步、过渡到下一步。
@@ -301,15 +302,20 @@ execute_sql 工具返回的结果中会包含「数据块 ID」（如 TABLE_1、
                 ],
             })
 
-            for tc in tool_calls:
+            # 并行执行所有 tool calls
+            async def _run_tool(tc):
                 logger.info("[Tool] call: %s args=%s", tc.function.name, tc.function.arguments[:200])
-                tool_result = await execute_tool_call(
+                res = await execute_tool_call(
                     tc, connection_string, render_blocks, block_counter,
                 )
-                logger.info("[Tool] result: %s", tool_result[:200])
+                logger.info("[Tool] result: %s", res[:200])
+                return tc.id, res
+
+            results = await asyncio.gather(*[_run_tool(tc) for tc in tool_calls])
+            for tc_id, tool_result in results:
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tc.id,
+                    "tool_call_id": tc_id,
                     "content": tool_result,
                 })
 

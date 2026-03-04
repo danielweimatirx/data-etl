@@ -1,5 +1,6 @@
 """Metric conversation LangGraph state graph (tool calling 版本)."""
 
+import asyncio
 import re
 import json
 import logging
@@ -129,7 +130,7 @@ async def tool_calling_loop_node(state: MetricChatState) -> dict:
     system_prompt = f"""你是一个智能数据助手，同时具备**数据加工（ETL）**和**指标定义**两种能力。
 {selected_tables_restriction}
 
-**你有一个工具 `execute_sql`**，可以在用户的 MySQL 数据库上执行任意 SQL。需要查数据、建库、建表、写入数据时，直接调用工具执行 SQL 即可。你可以多次调用工具来完成多步操作。
+**你有一个工具 `execute_sql`**，可以在用户的 MySQL 数据库上执行任意 SQL。需要查数据、建库、建表、写入数据时，直接调用工具执行 SQL 即可。你可以多次调用工具来完成多步操作。**当有多条互相独立的 SQL 需要执行时（如同时查看多张表的结构、同时预览多张表的数据），你应该在同一轮回复中同时调用多次工具，系统会并行执行，大幅提升效率。**
 
 ## 能力一：数据加工（ETL）
 你可以帮助用户完成完整的数据库操作，包括：
@@ -237,15 +238,20 @@ execute_sql 工具返回的结果中会包含「数据块 ID」（如 TABLE_1、
                 ],
             })
 
-            for tc in tool_calls:
+            # 并行执行所有 tool calls
+            async def _run_tool(tc):
                 logger.info("[Tool] call: %s args=%s", tc.function.name, tc.function.arguments[:200])
-                tool_result = await execute_tool_call(
+                res = await execute_tool_call(
                     tc, connection_string, render_blocks, block_counter,
                 )
-                logger.info("[Tool] result: %s", tool_result[:200])
+                logger.info("[Tool] result: %s", res[:200])
+                return tc.id, res
+
+            results = await asyncio.gather(*[_run_tool(tc) for tc in tool_calls])
+            for tc_id, tool_result in results:
                 messages.append({
                     'role': 'tool',
-                    'tool_call_id': tc.id,
+                    'tool_call_id': tc_id,
                     'content': tool_result,
                 })
 
