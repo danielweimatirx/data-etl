@@ -323,6 +323,8 @@ export async function fetchLineage(payload: {
   sql: string;
   connectionString: string;
   targetTable: string;
+  fieldMappings?: { targetField: string; sourceTable: string; sourceExpr: string; transform: string }[];
+  sourceTables?: string[];
 }): Promise<LineageResponse> {
   const key = _cacheKey({ type: 'lineage', sql: payload.sql, target: payload.targetTable });
   const cached = _lineageCache.get(key);

@@ -56,19 +56,274 @@ def _classify_table_role_in_sql(sql: str, ref: dict) -> str:
     return '基表'
 
 
+def _extract_join_relations(sql: str) -> list[dict]:
+    """从 SQL 中提取 JOIN 关系。"""
+    relations = []
+    # 匹配 JOIN ... ON ... 模式
+    join_pattern = re.compile(
+        r'(LEFT\s+|RIGHT\s+|INNER\s+|CROSS\s+|FULL\s+)?JOIN\s+'
+        r'(?:`([^`]+)`\.`([^`]+)`|([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)|`([^`]+)`|([a-zA-Z0-9_]+))'
+        r'(?:\s+(?:AS\s+)?(\w+))?'
+        r'(?:\s+ON\s+(.+?))?(?=\s+(?:LEFT|RIGHT|INNER|CROSS|FULL|JOIN|WHERE|GROUP|ORDER|LIMIT|HAVING|UNION|$))',
+        re.IGNORECASE | re.DOTALL,
+    )
+    for m in join_pattern.finditer(sql):
+        join_type = (m.group(1) or '').strip().upper() + 'JOIN'
+        join_type = join_type.replace('JOIN', ' JOIN').strip()
+        if not join_type.startswith(('LEFT', 'RIGHT', 'INNER', 'CROSS', 'FULL')):
+            join_type = 'INNER JOIN'
+        db = m.group(2) or m.group(4) or ''
+        tbl = m.group(3) or m.group(5) or m.group(6) or m.group(7) or ''
+        right_table = f'{db}.{tbl}' if db else tbl
+        condition = (m.group(9) or '').strip()
+        relations.append({
+            'rightTable': right_table,
+            'joinType': join_type,
+            'condition': condition,
+        })
+    return relations
+
+
+def _extract_sql_clause(sql: str, keyword: str) -> str:
+    """提取 SQL 中指定子句（GROUP BY / WHERE / HAVING）"""
+    pattern = re.compile(
+        rf'{keyword}\s+(.+?)(?=\s+(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|UNION|$))',
+        re.IGNORECASE | re.DOTALL,
+    )
+    m = pattern.search(sql)
+    return m.group(1).strip() if m else ''
+
+
+def _build_lineage_from_structured_data(
+    sql: str,
+    target_table: str,
+    field_mappings: list[dict],
+    source_tables: list[str],
+) -> dict:
+    """从结构化的 fieldMappings + SQL 直接构建血缘结果，无需 LLM。"""
+    # 解析 SQL 获取表引用及角色
+    refs = extract_table_refs_from_sql(sql)
+    ref_map = {}
+    for ref in refs:
+        full = f'{ref["database"]}.{ref["table"]}' if ref.get('database') else ref['table']
+        if full == target_table:
+            continue
+        role = _classify_table_role_in_sql(sql, ref)
+        ref_map[full] = {'role': role, 'ref': ref}
+
+    # 提取 JOIN 关系
+    join_rels_raw = _extract_join_relations(sql)
+
+    # 构建 sourceTables
+    built_sources = []
+    # 从引用信息构建
+    for full_name, info in ref_map.items():
+        # 找到对应的 JOIN 关系
+        join_type = '无（主表）'
+        join_cond = ''
+        for jr in join_rels_raw:
+            if jr['rightTable'].lower() == full_name.lower() or full_name.lower().endswith('.' + jr['rightTable'].lower()):
+                join_type = jr['joinType']
+                join_cond = jr['condition']
+                break
+        built_sources.append({
+            'name': full_name,
+            'alias': '',
+            'role': info['role'],
+            'joinType': join_type if info['role'] == '维表' else '无（主表）',
+            'joinCondition': join_cond if info['role'] == '维表' else '',
+        })
+    # 如果 SQL 解析没拿到表但 source_tables 有，补充
+    existing_names = {s['name'] for s in built_sources}
+    for st in source_tables:
+        if st not in existing_names and st != target_table:
+            built_sources.append({
+                'name': st, 'alias': '', 'role': '基表',
+                'joinType': '无（主表）', 'joinCondition': '',
+            })
+
+    # 构建 fieldMappings
+    built_field_mappings = []
+    for fm in field_mappings:
+        built_field_mappings.append({
+            'targetField': fm.get('targetField', ''),
+            'sourceTable': fm.get('sourceTable', ''),
+            'sourceField': fm.get('sourceExpr', ''),
+            'transform': fm.get('transform', '直接映射'),
+            'expression': fm.get('sourceExpr', ''),
+        })
+
+    # 构建 joinRelations（从解析结果）
+    built_joins = []
+    # 找主表
+    main_table = ''
+    for s in built_sources:
+        if s['role'] == '基表':
+            main_table = s['name']
+            break
+    for jr in join_rels_raw:
+        right = jr['rightTable']
+        # 尝试匹配全名
+        for s in built_sources:
+            if s['name'].lower() == right.lower() or s['name'].lower().endswith('.' + right.lower()):
+                right = s['name']
+                break
+        built_joins.append({
+            'leftTable': main_table,
+            'rightTable': right,
+            'joinType': jr['joinType'],
+            'condition': jr['condition'],
+        })
+
+    return {
+        'targetTable': target_table,
+        'sourceTables': built_sources,
+        'fieldMappings': built_field_mappings,
+        'joinRelations': built_joins,
+        'groupBy': _extract_sql_clause(sql, 'GROUP BY'),
+        'filters': _extract_sql_clause(sql, 'WHERE'),
+    }
+
+
+def _build_metric_lineage_from_data(
+    metric_def: dict,
+    relevant_processed: list[dict],
+    unique_sources: list[dict],
+    processed_table_names: set,
+) -> dict:
+    """从结构化数据直接构建指标全链路血缘，无需 LLM。"""
+    metric_name = metric_def.get('name', '')
+    metric_aggregation = metric_def.get('aggregation', '')
+    metric_measure_field = metric_def.get('measureField', '')
+    relevant_tables = metric_def.get('tables') or []
+
+    # source 层
+    source_tables = []
+    for s in unique_sources:
+        source_tables.append({
+            'name': s['name'],
+            'role': s['role'],
+            'fields': [],  # 后面填充
+        })
+
+    # 收集与指标相关的字段
+    measure_fields = set()
+    if metric_measure_field:
+        for f in re.split(r'[/\*\+\-\s,()]+', metric_measure_field):
+            f = f.strip()
+            if f and not f.isdigit():
+                measure_fields.add(f)
+
+    # processed 层
+    processed_layer_tables = []
+    for pt in relevant_processed:
+        pt_full = f'{pt["database"]}.{pt["table"]}'
+        if pt_full in processed_table_names:
+            # 只列出与指标相关的字段
+            related_fields = []
+            fm_list = pt.get('fieldMappings') or []
+            for fm in fm_list:
+                tf = fm.get('targetField', '')
+                if tf in measure_fields or not measure_fields:
+                    related_fields.append(tf)
+            # 如果 measure_fields 没匹配上，加入度量字段本身
+            if not related_fields and metric_measure_field:
+                related_fields = [metric_measure_field]
+            processed_layer_tables.append({
+                'name': pt_full,
+                'role': '业务表',
+                'fields': related_fields,
+            })
+
+    # 填充 source 层字段（从 fieldMappings 中筛选与指标相关的）
+    for st in source_tables:
+        fields = set()
+        for pt in relevant_processed:
+            for fm in (pt.get('fieldMappings') or []):
+                if fm.get('sourceTable', '') == st['name']:
+                    target_f = fm.get('targetField', '')
+                    if target_f in measure_fields or not measure_fields:
+                        fields.add(fm.get('sourceExpr', '') or target_f)
+        st['fields'] = list(fields) if fields else []
+
+    # 如果无加工表，指标涉及的表直接作为 source
+    if not processed_layer_tables and not source_tables:
+        for t in relevant_tables:
+            source_tables.append({'name': t, 'role': '基表', 'fields': [metric_measure_field] if metric_measure_field else []})
+
+    # 构建 edges
+    edges = []
+    # source → processed
+    for pt in relevant_processed:
+        pt_full = f'{pt["database"]}.{pt["table"]}'
+        for fm in (pt.get('fieldMappings') or []):
+            target_f = fm.get('targetField', '')
+            if target_f in measure_fields or not measure_fields:
+                edges.append({
+                    'from': {'table': fm.get('sourceTable', ''), 'field': fm.get('sourceExpr', '')},
+                    'to': {'table': pt_full, 'field': target_f},
+                    'transform': fm.get('transform', '直接映射'),
+                })
+    # processed → metric
+    for pt_tbl in processed_layer_tables:
+        for f in measure_fields or [metric_measure_field]:
+            edges.append({
+                'from': {'table': pt_tbl['name'], 'field': f},
+                'to': {'table': metric_name, 'field': f'{metric_aggregation}({metric_measure_field})'},
+                'transform': f'{metric_aggregation} 聚合',
+            })
+    # 无 processed 时 source → metric
+    if not processed_layer_tables:
+        for st in source_tables:
+            for f in measure_fields or [metric_measure_field]:
+                edges.append({
+                    'from': {'table': st['name'], 'field': f},
+                    'to': {'table': metric_name, 'field': f'{metric_aggregation}({metric_measure_field})'},
+                    'transform': f'{metric_aggregation} 聚合',
+                })
+
+    layers = [
+        {'level': 'source', 'label': '基表/维表', 'tables': source_tables},
+        {'level': 'processed', 'label': '加工业务表', 'tables': processed_layer_tables},
+        {'level': 'metric', 'label': '指标', 'tables': [
+            {'name': metric_name, 'role': '指标', 'fields': [f'{metric_aggregation}({metric_measure_field})']}
+        ]},
+    ]
+
+    # summary
+    src_names = ', '.join(s['name'] for s in source_tables)
+    proc_names = ', '.join(p['name'] for p in processed_layer_tables)
+    if proc_names:
+        summary = f'指标「{metric_name}」源自 {src_names}，经 ETL 加工为 {proc_names}，对 {metric_measure_field} 进行 {metric_aggregation} 聚合。'
+    else:
+        summary = f'指标「{metric_name}」直接基于 {src_names} 的 {metric_measure_field} 进行 {metric_aggregation} 聚合。'
+
+    return {'layers': layers, 'edges': edges, 'summary': summary}
+
+
 # ────────── POST /api/lineage — 解析 SQL 返回数据血缘 ──────────
 
 @router.post("/api/lineage")
 async def lineage(request_body: dict):
-    if not LLM_API_KEY:
-        return JSONResponse(status_code=503, content={"error": "DEEPSEEK_API_KEY not configured"})
-
     sql = request_body.get('sql')
     connection_string = request_body.get('connectionString')
     target_table = request_body.get('targetTable')
+    # 结构化数据（来自 ETL 过程的记录）
+    field_mappings = request_body.get('fieldMappings')
+    source_tables = request_body.get('sourceTables')
 
     if not sql:
         return JSONResponse(status_code=400, content={"error": "Missing sql"})
+
+    # ★ 有结构化数据时直接构建，跳过 LLM
+    if isinstance(field_mappings, list) and len(field_mappings) > 0:
+        result = _build_lineage_from_structured_data(
+            sql, target_table or '', field_mappings, source_tables or [],
+        )
+        return result
+
+    if not LLM_API_KEY:
+        return JSONResponse(status_code=503, content={"error": "DEEPSEEK_API_KEY not configured"})
 
     # 获取涉及表的结构
     schema_info = ''
@@ -86,60 +341,60 @@ async def lineage(request_body: dict):
                     f'  {c["Field"]} {c["Type"]}{" -- " + c["Comment"] if c.get("Comment") else ""}'
                     for c in cols
                 )
-                schema_info += f'\n\u8868 {full_name}:\n{col_list}\n'
+                schema_info += f'\n表 {full_name}:\n{col_list}\n'
 
-    system_prompt = f'''\u4f60\u662f\u4e00\u4e2a SQL \u8840\u7f18\u5206\u6790\u4e13\u5bb6\u3002\u5206\u6790\u4ee5\u4e0b INSERT INTO ... SELECT SQL\uff0c\u63d0\u53d6\u5b8c\u6574\u7684\u6570\u636e\u8840\u7f18\u5173\u7cfb\u3002
+    system_prompt = f'''你是一个 SQL 血缘分析专家。分析以下 INSERT INTO ... SELECT SQL，提取完整的数据血缘关系。
 
 **SQL**:
 ```sql
 {sql}
 ```
 
-**\u6d89\u53ca\u8868\u7684\u7ed3\u6784**:
-{schema_info or '\uff08\u672a\u63d0\u4f9b\uff09'}
+**涉及表的结构**:
+{schema_info or '（未提供）'}
 
-**\u76ee\u6807\u8868**: {target_table or '\u4ece SQL \u4e2d\u63d0\u53d6'}
+**目标表**: {target_table or '从 SQL 中提取'}
 
-\u8bf7\u5206\u6790\u5e76\u8fd4\u56de JSON\uff08\u4e0d\u8981 markdown \u4ee3\u7801\u5757\uff09\uff0c\u683c\u5f0f\u5982\u4e0b\uff1a
+请分析并返回 JSON（不要 markdown 代码块），格式如下：
 {{
-  "targetTable": "\u5e93\u540d.\u8868\u540d",
+  "targetTable": "库名.表名",
   "sourceTables": [
     {{
-      "name": "\u5e93\u540d.\u8868\u540d",
-      "alias": "SQL\u4e2d\u7684\u522b\u540d\uff08\u5982\u6709\uff09",
-      "role": "\u57fa\u8868|\u7ef4\u8868|\u5173\u8054\u8868",
-      "joinType": "LEFT JOIN|INNER JOIN|\u65e0\uff08\u4e3b\u8868\uff09",
-      "joinCondition": "ON \u6761\u4ef6\uff08\u5982\u6709\uff09"
+      "name": "库名.表名",
+      "alias": "SQL中的别名（如有）",
+      "role": "基表|维表|关联表",
+      "joinType": "LEFT JOIN|INNER JOIN|无（主表）",
+      "joinCondition": "ON 条件（如有）"
     }}
   ],
   "fieldMappings": [
     {{
-      "targetField": "\u76ee\u6807\u5b57\u6bb5\u540d",
-      "sourceTable": "\u6765\u6e90\u8868\u5168\u540d\uff08\u5e93\u540d.\u8868\u540d\uff09",
-      "sourceField": "\u6765\u6e90\u5b57\u6bb5\u540d",
-      "transform": "\u52a0\u5de5\u903b\u8f91\u63cf\u8ff0\uff0c\u5982\uff1a\u76f4\u63a5\u6620\u5c04\u3001SUM\u805a\u5408\u3001COUNT\u8ba1\u6570\u3001CASE WHEN\u6761\u4ef6\u8f6c\u6362\u3001LEFT JOIN\u5173\u8054\u53d6\u503c\u3001COALESCE\u7a7a\u503c\u5904\u7406 \u7b49",
-      "expression": "\u539f\u59cbSQL\u8868\u8fbe\u5f0f\u7247\u6bb5"
+      "targetField": "目标字段名",
+      "sourceTable": "来源表全名（库名.表名）",
+      "sourceField": "来源字段名",
+      "transform": "加工逻辑描述，如：直接映射、SUM聚合、COUNT计数、CASE WHEN条件转换、LEFT JOIN关联取值、COALESCE空值处理 等",
+      "expression": "原始SQL表达式片段"
     }}
   ],
   "joinRelations": [
     {{
-      "leftTable": "\u5e93\u540d.\u8868\u540d",
-      "rightTable": "\u5e93\u540d.\u8868\u540d",
+      "leftTable": "库名.表名",
+      "rightTable": "库名.表名",
       "joinType": "LEFT JOIN|INNER JOIN",
-      "condition": "ON \u6761\u4ef6"
+      "condition": "ON 条件"
     }}
   ],
-  "groupBy": "GROUP BY \u5b57\u6bb5\u5217\u8868\uff08\u5982\u6709\uff09",
-  "filters": "WHERE \u6761\u4ef6\uff08\u5982\u6709\uff09"
+  "groupBy": "GROUP BY 字段列表（如有）",
+  "filters": "WHERE 条件（如有）"
 }}
 
-**\u8981\u6c42**\uff1a
-- \u6bcf\u4e2a\u76ee\u6807\u5b57\u6bb5\u90fd\u5fc5\u987b\u8ffd\u6eaf\u5230\u5177\u4f53\u7684\u6765\u6e90\u8868\u548c\u6765\u6e90\u5b57\u6bb5
-- \u5982\u679c\u4e00\u4e2a\u76ee\u6807\u5b57\u6bb5\u6d89\u53ca\u591a\u4e2a\u6765\u6e90\u8868/\u5b57\u6bb5\uff08\u5982 JOIN \u540e\u53d6\u503c\uff09\uff0c\u5217\u51fa\u4e3b\u8981\u6765\u6e90
-- transform \u8981\u7528\u4e2d\u6587\u63cf\u8ff0\u6e05\u695a\u52a0\u5de5\u903b\u8f91
-- \u7ef4\u8868\uff08\u901a\u8fc7 JOIN \u5173\u8054\u7684\u67e5\u627e\u8868\uff09\u7684 role \u6807\u8bb0\u4e3a\u201c\u7ef4\u8868\u201d
-- \u4e3b\u8981\u6570\u636e\u6765\u6e90\u8868\u7684 role \u6807\u8bb0\u4e3a\u201c\u57fa\u8868\u201d
-- sourceTables \u5fc5\u987b\u5305\u542b SQL \u4e2d FROM \u548c\u6240\u6709 JOIN \u6d89\u53ca\u7684\u8868'''
+**要求**：
+- 每个目标字段都必须追溯到具体的来源表和来源字段
+- 如果一个目标字段涉及多个来源表/字段（如 JOIN 后取值），列出主要来源
+- transform 要用中文描述清楚加工逻辑
+- 维表（通过 JOIN 关联的查找表）的 role 标记为"维表"
+- 主要数据来源表的 role 标记为"基表"
+- sourceTables 必须包含 SQL 中 FROM 和所有 JOIN 涉及的表'''
 
     # 检查缓存
     cache_key = _make_cache_key({'type': 'lineage', 'sql': sql, 'targetTable': target_table})
@@ -150,24 +405,24 @@ async def lineage(request_body: dict):
         llm_result = await call_llm(
             messages=[
                 {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': '\u8bf7\u5206\u6790\u8fd9\u6761 SQL \u7684\u6570\u636e\u8840\u7f18\u5173\u7cfb\u3002'},
+                {'role': 'user', 'content': '请分析这条 SQL 的数据血缘关系。'},
             ],
             temperature=0.1,
             max_tokens=4096,
         )
         if not llm_result['ok']:
-            return JSONResponse(status_code=llm_result.get('status', 500), content={"error": llm_result['error'] or "\u8840\u7f18\u5206\u6790\u5931\u8d25"})
+            return JSONResponse(status_code=llm_result.get('status', 500), content={"error": llm_result['error'] or "血缘分析失败"})
 
         content = (llm_result.get('content') or '').strip()
         json_match = re.search(r'\{[\s\S]*\}', content)
         if not json_match:
-            return JSONResponse(status_code=500, content={"error": "\u6a21\u578b\u672a\u8fd4\u56de\u6709\u6548 JSON"})
+            return JSONResponse(status_code=500, content={"error": "模型未返回有效 JSON"})
         parsed = json.loads(json_match.group(0))
         _lineage_cache[cache_key] = parsed
         return parsed
     except Exception as e:
         print(f'[/api/lineage] {e}')
-        return JSONResponse(status_code=500, content={"error": str(e) or "\u8840\u7f18\u5206\u6790\u5931\u8d25"})
+        return JSONResponse(status_code=500, content={"error": str(e) or "血缘分析失败"})
 
 
 # ────────── POST /api/metric-lineage — 指标全链路血缘 ──────────
@@ -248,7 +503,7 @@ async def metric_lineage(request_body: dict):
                         f'  {c["Field"]} {c["Type"]}{" -- " + c["Comment"] if c.get("Comment") else ""}'
                         for c in cols_list
                     )
-                    schema_info += f'\n\u8868 {tbl}:\n{col_str}\n'
+                    schema_info += f'\n表 {tbl}:\n{col_str}\n'
 
     # 收集加工 SQL 和字段映射信息
     etl_info_parts = []
@@ -256,15 +511,15 @@ async def metric_lineage(request_body: dict):
         mapping_info = ''
         if isinstance(pt.get('fieldMappings'), list) and len(pt['fieldMappings']) > 0:
             mapping_lines = '\n'.join(
-                f'    {fm["targetField"]} \u2190 {fm["sourceTable"]}.{fm["sourceExpr"]} ({fm["transform"]})'
+                f'    {fm["targetField"]} ← {fm["sourceTable"]}.{fm["sourceExpr"]} ({fm["transform"]})'
                 for fm in pt['fieldMappings']
             )
-            mapping_info = f'  \u5b57\u6bb5\u6620\u5c04:\n{mapping_lines}'
+            mapping_info = f'  字段映射:\n{mapping_lines}'
         source_tables_str = ', '.join(pt.get('sourceTables') or [])
-        entry = f'\u52a0\u5de5\u8868 {pt["database"]}.{pt["table"]}:\n  \u6765\u6e90\u8868: {source_tables_str}'
+        entry = f'加工表 {pt["database"]}.{pt["table"]}:\n  来源表: {source_tables_str}'
         if mapping_info:
             entry += '\n' + mapping_info
-        entry += f'\n  \u52a0\u5de5SQL: {pt.get("insertSql") or "\u65e0"}'
+        entry += f'\n  加工SQL: {pt.get("insertSql") or "无"}'
         etl_info_parts.append(entry)
     etl_info = '\n\n'.join(etl_info_parts)
 
@@ -281,6 +536,17 @@ async def metric_lineage(request_body: dict):
     metric_definition = metric_def.get('definition', '')
     metric_aggregation = metric_def.get('aggregation', '')
     metric_measure_field = metric_def.get('measureField', '')
+
+    # ★ 有结构化数据 或 无加工表（直接基于原始表）时，直接构建，跳过 LLM
+    has_structured = any(
+        isinstance(pt.get('fieldMappings'), list) and len(pt['fieldMappings']) > 0
+        for pt in relevant_processed
+    )
+    no_processed = len(relevant_processed) == 0
+    if has_structured or unique_sources or no_processed:
+        return _build_metric_lineage_from_data(
+            metric_def, relevant_processed, unique_sources, processed_table_names,
+        )
 
     # 构建业务表名列表（用于在 prompt 中明确哪些是业务表）
     processed_names_list = ', '.join(processed_table_names) if processed_table_names else '（无）'

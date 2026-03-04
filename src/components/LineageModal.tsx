@@ -194,7 +194,13 @@ export default function LineageModal({ table, onClose, onAddMetric }: Props) {
     }
     setLoading(true);
     setError('');
-    fetchLineage({ sql: table.insertSql, connectionString, targetTable: targetName })
+    fetchLineage({
+      sql: table.insertSql,
+      connectionString,
+      targetTable: targetName,
+      fieldMappings: table.fieldMappings,
+      sourceTables: table.sourceTables,
+    })
       .then(data => setLineage(data))
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
