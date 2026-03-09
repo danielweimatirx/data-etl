@@ -1,21 +1,10 @@
 import { create } from 'zustand';
 import type { MetricDef } from './types';
-
-const STORAGE_KEY = 'etl-metric-defs';
-
-function loadAll(): MetricDef[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-
-function saveAll(defs: MetricDef[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(defs));
-}
+import { fetchMetricDefs, upsertMetricDefApi, deleteMetricDefApi } from './api';
 
 interface MetricDefState {
   defs: MetricDef[];
+  loadFromServer: () => Promise<void>;
   add: (def: Omit<MetricDef, 'id' | 'createdAt'>) => MetricDef;
   remove: (id: string) => void;
   getAll: () => MetricDef[];
@@ -23,7 +12,16 @@ interface MetricDefState {
 }
 
 export const useMetricDefStore = create<MetricDefState>((set, get) => ({
-  defs: loadAll(),
+  defs: [],
+
+  loadFromServer: async () => {
+    try {
+      const defs = await fetchMetricDefs();
+      set({ defs });
+    } catch (e) {
+      console.error('[MetricDefStore] loadFromServer failed:', e);
+    }
+  },
 
   add: (entry) => {
     const def: MetricDef = {
@@ -31,19 +29,16 @@ export const useMetricDefStore = create<MetricDefState>((set, get) => ({
       id: `md-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       createdAt: Date.now(),
     };
-    const updated = [def, ...get().defs];
-    saveAll(updated);
-    set({ defs: updated });
+    set({ defs: [def, ...get().defs] });
+    upsertMetricDefApi(def).catch(console.error);
     return def;
   },
 
   remove: (id) => {
-    const updated = get().defs.filter(d => d.id !== id);
-    saveAll(updated);
-    set({ defs: updated });
+    set({ defs: get().defs.filter(d => d.id !== id) });
+    deleteMetricDefApi(id).catch(console.error);
   },
 
   getAll: () => get().defs,
-
   getByDashboard: (dashboardId) => get().defs.filter(d => d.dashboardId === dashboardId),
 }));

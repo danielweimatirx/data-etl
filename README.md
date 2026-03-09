@@ -13,7 +13,8 @@
 
 - 前端：React + TypeScript + Vite + Tailwind CSS + Zustand
 - 后端：Node.js + Express + mysql2
-- 模型：DeepSeek API（意图解析 + 对话回复）
+- 模型：通义千问 qwen3-max（意图解析 + 对话回复），通过 OpenAI 兼容接口调用
+- 数据持久化：MatrixOne 数据库（应用数据共享）
 
 ## 本地运行
 
@@ -23,36 +24,43 @@
 npm install
 ```
 
-### 2. 配置环境变量
+### 2. 启动
 
-在项目根目录创建 `.env`，配置 DeepSeek API Key：
-
-```
-DEEPSEEK_API_KEY=your_deepseek_api_key
-```
-
-### 3. 启动
+LLM 和数据库配置已内置，无需额外配置即可直接启动：
 
 ```bash
 # 同时启动后端 + 前端（推荐）
 npm run dev:all
 
 # 或分别启动
-npm run dev:server   # 后端 http://localhost:3000
+npm run dev:server   # 后端 http://localhost:3001
 npm run dev          # 前端 Vite 开发服务器
 ```
 
 浏览器访问前端地址（Vite 默认如 `http://localhost:5173`），在对话中输入 MySQL 连接串即可开始。连接串示例：`mysql://username:password@host:3306/database_name`。
 
+### 可选：自定义配置
+
+如需覆盖默认配置，创建 `.env` 文件：
+
+```
+LLM_API_KEY=your_api_key
+LLM_BASE_URL=https://your-llm-endpoint/v1
+LLM_MODEL=your-model-name
+PORT=3001
+```
+
 ## 项目结构
 
 ```
 ├── server/          # 后端 Express API、意图解析、数据库执行
+│   ├── server.js    # 主服务
+│   └── appDb.js     # 应用数据持久化层（MatrixOne）
 ├── src/              # 前端 React 应用
 │   ├── components/  # 对话、输入、消息展示等
 │   ├── store.ts     # 对话状态与演示流程
 │   └── types.ts     # ETL 步骤与类型定义
-├── .env              # 环境变量（需自行创建，勿提交）
+├── .env              # 环境变量（可选，已有内置默认值）
 └── package.json
 ```
 
