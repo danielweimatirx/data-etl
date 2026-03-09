@@ -286,8 +286,8 @@ async function runDatabaseOperation(connectionString, intent, params = {}) {
   }
 }
 
-async function extractDbIntentFromModel(conversation, DEEPSEEK_API_KEY, DEEPSEEK_CHAT_URL) {
-  if (!DEEPSEEK_API_KEY || !Array.isArray(conversation) || conversation.length === 0) return { intent: null, params: {} };
+async function extractDbIntentFromModel(conversation, LLM_API_KEY, LLM_CHAT_URL) {
+  if (!LLM_API_KEY || !Array.isArray(conversation) || conversation.length === 0) return { intent: null, params: {} };
   const systemContent = `你是一个意图解析器。根据用户与助手的对话，判断用户**最后一条消息**是否需要对 MySQL 数据库执行操作。
 
 **支持的 intent 与 params**：
@@ -320,10 +320,10 @@ async function extractDbIntentFromModel(conversation, DEEPSEEK_API_KEY, DEEPSEEK
   ];
 
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
-      body: JSON.stringify({ model: 'deepseek-chat', messages, stream: false, temperature: 0.1, max_tokens: 1024 }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
+      body: JSON.stringify({ model: LLM_MODEL, messages, stream: false, temperature: 0.1, max_tokens: 1024 }),
     });
     const text = await response.text();
     if (!response.ok) return { intent: null, params: {} };
@@ -347,9 +347,10 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
-const DEEPSEEK_BASE = 'https://api.deepseek.com';
-const DEEPSEEK_CHAT_URL = `${DEEPSEEK_BASE}/v1/chat/completions`;
+const LLM_API_KEY = process.env.LLM_API_KEY || 'sk-8e7a35e7fa784756b2459cb228599ab9';
+const LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const LLM_MODEL = process.env.LLM_MODEL || 'qwen3-max';
+const LLM_CHAT_URL = `${LLM_BASE_URL}/chat/completions`;
 
 app.get('/', (req, res) => {
   res.json({
@@ -359,14 +360,14 @@ app.get('/', (req, res) => {
       'POST /api/chat': 'ETL 六步对话',
       'POST /api/mapping': '字段映射',
       'POST /api/dml': '生成 DML',
-      'GET /api/debug-deepseek': '测试 DeepSeek',
+      'GET /api/debug-llm': '测试 LLM',
     },
   });
 });
 
 // ────────── /api/chat — ETL 六步对话主入口 ──────────
 app.post('/api/chat', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
 
   const { conversation, context } = req.body;
   if (!Array.isArray(conversation) || conversation.length === 0) {
@@ -405,7 +406,7 @@ app.post('/api/chat', async (req, res) => {
     lastUserContent && looksLikeConnectionString(lastUserContent) && lastUserContent.trim().length < 500;
   const dbIntent =
     connectionString && lastUserContent && !lastMessageIsOnlyConnectionString
-      ? await extractDbIntentFromModel(conversation, DEEPSEEK_API_KEY, DEEPSEEK_CHAT_URL)
+      ? await extractDbIntentFromModel(conversation, LLM_API_KEY, LLM_CHAT_URL)
       : { intent: null, params: {} };
 
   if (connectionString && dbIntent.intent) {
@@ -617,10 +618,10 @@ ${dbOperationNote}
   ];
 
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
-      body: JSON.stringify({ model: 'deepseek-chat', messages, stream: false, temperature: 0.3, max_tokens: 4096 }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
+      body: JSON.stringify({ model: LLM_MODEL, messages, stream: false, temperature: 0.3, max_tokens: 4096 }),
     });
     const errBody = await response.text();
     if (!response.ok) {
@@ -629,7 +630,7 @@ ${dbOperationNote}
       return res.status(response.status).json({ error: errMsg });
     }
     let data;
-    try { data = JSON.parse(errBody); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+    try { data = JSON.parse(errBody); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
     const content = (data.choices?.[0]?.message?.content || '').trim();
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     let out = { reply: content, connectionReceived: false, currentStep: currentStepHint || 1 };
@@ -643,8 +644,8 @@ ${dbOperationNote}
     }
     return res.json({ ...out, connectionTestOk });
   } catch (e) {
-    console.error('[DeepSeek /api/chat]', e.message);
-    return res.status(500).json({ error: e.message || 'DeepSeek 请求失败' });
+    console.error('[LLM /api/chat]', e.message);
+    return res.status(500).json({ error: e.message || 'LLM 请求失败' });
   }
 });
 
@@ -682,7 +683,7 @@ ${mapped.length > 0 ? `**已映射的字段**：${mapped.map(m => m.targetField)
 }
 
 app.post('/api/mapping', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
 
   const { message, conversation, targetTableName, targetFields, existingMappings } = req.body;
   if (!message || !targetTableName || !Array.isArray(targetFields)) {
@@ -704,10 +705,10 @@ app.post('/api/mapping', async (req, res) => {
   }
 
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
-      body: JSON.stringify({ model: 'deepseek-chat', messages: chatMessages, stream: false, temperature: 0.2, max_tokens: 4096 }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
+      body: JSON.stringify({ model: LLM_MODEL, messages: chatMessages, stream: false, temperature: 0.2, max_tokens: 4096 }),
     });
     const errBody = await response.text();
     if (!response.ok) {
@@ -716,7 +717,7 @@ app.post('/api/mapping', async (req, res) => {
       return res.status(response.status).json({ error: errMsg });
     }
     let data;
-    try { data = JSON.parse(errBody); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+    try { data = JSON.parse(errBody); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
     const content = data.choices?.[0]?.message?.content?.trim() || '';
     let parsed = { mappings: [] };
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -724,14 +725,14 @@ app.post('/api/mapping', async (req, res) => {
     if (!Array.isArray(parsed.mappings)) parsed.mappings = [];
     return res.json(parsed);
   } catch (e) {
-    console.error('[DeepSeek /api/mapping]', e.message);
-    return res.status(500).json({ error: e.message || 'DeepSeek 请求失败' });
+    console.error('[LLM /api/mapping]', e.message);
+    return res.status(500).json({ error: e.message || 'LLM 请求失败' });
   }
 });
 
 // ────────── /api/dml ──────────
 app.post('/api/dml', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
 
   const { targetTableFullName, mappings } = req.body;
   if (!targetTableFullName || !Array.isArray(mappings) || mappings.length === 0) {
@@ -752,11 +753,11 @@ ${mappingList.map((m) => `- ${m.targetField}: source=${m.source}, logic=${m.logi
 **输出**：1) TRUNCATE TABLE 目标表; 2) INSERT INTO 目标表 (列...) SELECT ... FROM 主表 LEFT JOIN ... 只输出 MySQL 可执行的 SQL，无 markdown。`;
 
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: LLM_MODEL,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: '请用 JOIN 写法生成 DML。' },
@@ -771,29 +772,29 @@ ${mappingList.map((m) => `- ${m.targetField}: source=${m.source}, logic=${m.logi
       return res.status(response.status).json({ error: errMsg });
     }
     let data;
-    try { data = JSON.parse(errBody); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+    try { data = JSON.parse(errBody); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
     const content = (data.choices?.[0]?.message?.content || '').trim();
     const dml = content.replace(/^```\w*\n?|```\s*$/g, '').trim();
     return res.json({ dml: dml || content });
   } catch (e) {
-    console.error('[DeepSeek /api/dml]', e.message);
-    return res.status(500).json({ error: e.message || 'DeepSeek 请求失败' });
+    console.error('[LLM /api/dml]', e.message);
+    return res.status(500).json({ error: e.message || 'LLM 请求失败' });
   }
 });
 
 // ────────── /api/dml/optimize ──────────
 app.post('/api/dml/optimize', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
   const { dml } = req.body;
   if (!dml || typeof dml !== 'string') return res.status(400).json({ error: 'Missing dml' });
 
   const systemPrompt = `你是 MySQL SQL 优化专家。将标量子查询改为 JOIN，保持语义不变。输出必须为**标准 MySQL 语法**、可直接在 MySQL 中执行。只输出优化后的完整 SQL，不要 markdown 或解释。`;
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: LLM_MODEL,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `请优化：\n\n${dml}` },
@@ -808,25 +809,25 @@ app.post('/api/dml/optimize', async (req, res) => {
       return res.status(response.status).json({ error: errMsg });
     }
     let data;
-    try { data = JSON.parse(errBody); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+    try { data = JSON.parse(errBody); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
     const content = (data.choices?.[0]?.message?.content || '').trim();
     return res.json({ dml: content.replace(/^```\w*\n?|```\s*$/g, '').trim() || content });
   } catch (e) {
-    console.error('[DeepSeek /api/dml/optimize]', e.message);
-    return res.status(500).json({ error: e.message || 'DeepSeek 请求失败' });
+    console.error('[LLM /api/dml/optimize]', e.message);
+    return res.status(500).json({ error: e.message || 'LLM 请求失败' });
   }
 });
 
-// ────────── /api/debug-deepseek ──────────
-app.get('/api/debug-deepseek', async (req, res) => {
-  const hasKey = !!DEEPSEEK_API_KEY;
-  if (!hasKey) return res.json({ ok: false, reason: 'DEEPSEEK_API_KEY 未设置' });
+// ────────── /api/debug-llm ──────────
+app.get('/api/debug-llm', async (req, res) => {
+  const hasKey = !!LLM_API_KEY;
+  if (!hasKey) return res.json({ ok: false, reason: 'LLM_API_KEY 未设置' });
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: LLM_MODEL,
         messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'Say hello in one word.' }],
         stream: false,
       }),
@@ -872,7 +873,7 @@ app.post('/api/tables', async (req, res) => {
 
 // ────────── /api/metric/match — 根据描述匹配已有指标 ──────────
 app.post('/api/metric/match', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
 
   const { description, metricDefs } = req.body;
   if (!description || !Array.isArray(metricDefs) || metricDefs.length === 0) {
@@ -897,11 +898,11 @@ ${defsContext}
 {"matches":[{"name":"指标名称","reason":"匹配原因"}],"suggestion":"对用户需求的理解和建议"}`;
 
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: LLM_MODEL,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: description },
@@ -916,7 +917,7 @@ ${defsContext}
       return res.status(response.status).json({ error: errMsg });
     }
     let data;
-    try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+    try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
     const content = (data.choices?.[0]?.message?.content || '').trim();
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return res.status(500).json({ error: '模型未返回有效 JSON' });
@@ -933,7 +934,7 @@ ${defsContext}
 
 // ────────── /api/metric/generate — 根据指标定义 + 维度描述生成 SQL ──────────
 app.post('/api/metric/generate', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
 
   const { metricName, definition, description, metricDefs, connectionString } = req.body;
   if (!metricName || !description) {
@@ -1042,11 +1043,11 @@ ${schemaInfo || '（未提供表结构，请根据指标定义合理推断）'}
 
   try {
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      const response = await fetch(DEEPSEEK_CHAT_URL, {
+      const response = await fetch(LLM_CHAT_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
         body: JSON.stringify({
-          model: 'deepseek-chat',
+          model: LLM_MODEL,
           messages: chatMessages,
           stream: false, temperature: 0.2, max_tokens: 2048,
         }),
@@ -1058,7 +1059,7 @@ ${schemaInfo || '（未提供表结构，请根据指标定义合理推断）'}
         return res.status(response.status).json({ error: errMsg });
       }
       let data;
-      try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+      try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
       const content = (data.choices?.[0]?.message?.content || '').trim();
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
@@ -1208,7 +1209,7 @@ app.post('/api/metric/query', async (req, res) => {
 
 // ────────── /api/lineage — 解析 SQL 返回数据血缘 ──────────
 app.post('/api/lineage', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
 
   const { sql, connectionString, targetTable } = req.body;
   if (!sql) return res.status(400).json({ error: 'Missing sql' });
@@ -1282,11 +1283,11 @@ ${schemaInfo || '（未提供）'}
 - sourceTables 必须包含 SQL 中 FROM 和所有 JOIN 涉及的表`;
 
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: LLM_MODEL,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: '请分析这条 SQL 的数据血缘关系。' },
@@ -1301,7 +1302,7 @@ ${schemaInfo || '（未提供）'}
       return res.status(response.status).json({ error: errMsg });
     }
     let data;
-    try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+    try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
     const content = (data.choices?.[0]?.message?.content || '').trim();
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return res.status(500).json({ error: '模型未返回有效 JSON' });
@@ -1315,7 +1316,7 @@ ${schemaInfo || '（未提供）'}
 
 // ────────── /api/metric-lineage — 指标全链路血缘 ──────────
 app.post('/api/metric-lineage', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
 
   const { metricDef, processedTables, connectionString } = req.body;
   if (!metricDef) return res.status(400).json({ error: 'Missing metricDef' });
@@ -1430,11 +1431,11 @@ ${schemaInfo || '（未提供）'}
 }`;
 
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: LLM_MODEL,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `请分析指标「${metricDef.name}」的全链路血缘` },
@@ -1449,7 +1450,7 @@ ${schemaInfo || '（未提供）'}
       return res.status(response.status).json({ error: errMsg });
     }
     let data;
-    try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+    try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
     const content = (data.choices?.[0]?.message?.content || '').trim();
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return res.status(500).json({ error: '模型未返回有效 JSON' });
@@ -1463,7 +1464,7 @@ ${schemaInfo || '（未提供）'}
 
 // ────────── /api/metric-chat — 指标定义对话 ──────────
 app.post('/api/metric-chat', async (req, res) => {
-  if (!DEEPSEEK_API_KEY) return res.status(503).json({ error: 'DEEPSEEK_API_KEY not configured' });
+  if (!LLM_API_KEY) return res.status(503).json({ error: 'LLM_API_KEY not configured' });
 
   const { conversation, connectionString, selectedTables } = req.body;
   if (!Array.isArray(conversation) || conversation.length === 0) {
@@ -1474,7 +1475,7 @@ app.post('/api/metric-chat', async (req, res) => {
   // ── 数据库操作（与 ETL chat 完全一致的能力） ──
   let dbOperationNote = '';
   if (connectionString) {
-    const dbIntent = await extractDbIntentFromModel(conversation, DEEPSEEK_API_KEY, DEEPSEEK_CHAT_URL);
+    const dbIntent = await extractDbIntentFromModel(conversation, LLM_API_KEY, LLM_CHAT_URL);
 
     if (dbIntent.intent) {
       const esc = (n) => { const s = safeIdentifier(n); return s ? '`' + s + '`' : ''; };
@@ -1696,10 +1697,10 @@ ${dbOperationNote}
   ];
 
   try {
-    const response = await fetch(DEEPSEEK_CHAT_URL, {
+    const response = await fetch(LLM_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
-      body: JSON.stringify({ model: 'deepseek-chat', messages, stream: false, temperature: 0.3, max_tokens: 4096 }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
+      body: JSON.stringify({ model: LLM_MODEL, messages, stream: false, temperature: 0.3, max_tokens: 4096 }),
     });
     const bodyText = await response.text();
     if (!response.ok) {
@@ -1708,7 +1709,7 @@ ${dbOperationNote}
       return res.status(response.status).json({ error: errMsg });
     }
     let data;
-    try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'DeepSeek 返回格式异常' }); }
+    try { data = JSON.parse(bodyText); } catch (e) { return res.status(500).json({ error: 'LLM 返回格式异常' }); }
     const content = (data.choices?.[0]?.message?.content || '').trim();
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     let out = { reply: content };
@@ -1726,7 +1727,105 @@ ${dbOperationNote}
   }
 });
 
+// ────────── 应用数据持久化 API ──────────
+const appDb = require('./appDb');
+
+// 中间件：/api/app/* 请求需要数据库就绪（status 端点除外）
+app.use('/api/app', (req, res, next) => {
+  if (req.path === '/status') return next();
+  if (!appDb.isReady()) {
+    return res.status(503).json({ error: '应用数据库未就绪，请检查数据库连接配置' });
+  }
+  next();
+});
+
+// Dashboard
+app.get('/api/app/dashboards', async (req, res) => {
+  try { res.json(await appDb.listDashboards()); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/app/dashboards', async (req, res) => {
+  try { res.json(await appDb.createDashboard(req.body)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put('/api/app/dashboards/:id', async (req, res) => {
+  try { await appDb.updateDashboard(req.params.id, req.body); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/app/dashboards/:id', async (req, res) => {
+  try { await appDb.deleteDashboard(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Metrics
+app.get('/api/app/metrics', async (req, res) => {
+  try { res.json(await appDb.listMetrics(req.query.dashboardId || null)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/app/metrics', async (req, res) => {
+  try { await appDb.upsertMetric(req.body); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/app/metrics/:id', async (req, res) => {
+  try { await appDb.deleteMetric(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/app/metrics/by-dashboard/:dashboardId', async (req, res) => {
+  try { await appDb.clearMetricsByDashboard(req.params.dashboardId); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// MetricDefs
+app.get('/api/app/metric-defs', async (req, res) => {
+  try { res.json(await appDb.listMetricDefs(req.query.dashboardId || null)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/app/metric-defs', async (req, res) => {
+  try { await appDb.upsertMetricDef(req.body); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/app/metric-defs/:id', async (req, res) => {
+  try { await appDb.deleteMetricDef(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ProcessedTables
+app.get('/api/app/processed-tables', async (req, res) => {
+  try { res.json(await appDb.listProcessedTables(req.query.dashboardId || null)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/app/processed-tables', async (req, res) => {
+  try { await appDb.upsertProcessedTable(req.body); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/app/processed-tables/:id', async (req, res) => {
+  try { await appDb.deleteProcessedTable(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/app/processed-tables/by-dashboard/:dashboardId', async (req, res) => {
+  try { await appDb.clearProcessedTablesByDashboard(req.params.dashboardId); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Chat Messages
+app.get('/api/app/chat/:dashboardId/:chatType', async (req, res) => {
+  try { res.json(await appDb.getChatMessages(req.params.dashboardId, req.params.chatType) || null); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/app/chat/:dashboardId/:chatType', async (req, res) => {
+  try { await appDb.saveChatMessages(req.params.dashboardId, req.params.chatType, req.body); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/app/chat/:dashboardId/:chatType?', async (req, res) => {
+  try { await appDb.deleteChatMessages(req.params.dashboardId, req.params.chatType || null); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Schema Selections
+app.get('/api/app/schema-selection/:dashboardId', async (req, res) => {
+  try { res.json(await appDb.getSchemaSelection(req.params.dashboardId)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/app/schema-selection/:dashboardId', async (req, res) => {
+  try { await appDb.saveSchemaSelection(req.params.dashboardId, req.body.selectedTables || []); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// App DB status
+app.get('/api/app/status', (req, res) => {
+  res.json({ enabled: appDb.isReady() });
+});
+
+// 启动服务器，数据库初始化不阻塞启动
 app.listen(PORT, () => {
   console.log(`ETL API server http://localhost:${PORT}`);
-  console.log(`  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY ? '已设置' : '未设置'}`);
+  console.log(`  LLM_API_KEY: ${LLM_API_KEY ? '已设置' : '未设置'}`);
+  console.log(`  APP_DB: ${appDb.isEnabled() ? '已配置，正在初始化...' : '未配置（使用 localStorage）'}`);
 });
+// 后台初始化数据库（不阻塞服务启动）
+if (appDb.isEnabled()) {
+  appDb.initTables().then(ok => {
+    if (ok) console.log('[AppDB] 数据库就绪');
+    else console.log('[AppDB] 数据库初始化失败，降级为 localStorage');
+  });
+}

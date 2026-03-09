@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { ChatMessage, ContentBlock, EtlStep } from './types';
 import type { ConversationTurn } from './api';
-import { fetchChatWithModel } from './api';
+import { fetchChatWithModel, fetchChatState, saveChatStateApi } from './api';
 import { useProcessedTableStore } from './processedTableStore';
 import { useSchemaStore } from './schemaStore';
 
@@ -203,22 +203,11 @@ function getDemoMessageDelay(msg: ChatMessage): number {
 /** 持久化当前 dashboard 的聊天状态 */
 function persistState(state: { dashboardId: string | null; step: EtlStep; connectionString: string | null; messages: ChatMessage[] }) {
   if (!state.dashboardId) return;
-  const key = `etl-chat-${state.dashboardId}`;
-  localStorage.setItem(key, JSON.stringify({
+  saveChatStateApi(state.dashboardId, 'etl', {
     step: state.step,
     connectionString: state.connectionString,
     messages: state.messages,
-  }));
-}
-
-function loadState(dashboardId: string): { step: EtlStep; connectionString: string | null; messages: ChatMessage[] } | null {
-  try {
-    const raw = localStorage.getItem(`etl-chat-${dashboardId}`);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  }).catch(console.error);
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -226,31 +215,27 @@ export const useStore = create<AppState>((set, get) => ({
 
   loadForDashboard: (dashboardId: string) => {
     msgId = 0;
-    const saved = loadState(dashboardId);
-    if (saved) {
-      // 恢复 msgId
-      const maxId = saved.messages.reduce((max, m) => {
-        const match = m.id.match(/^msg-(\d+)$/);
-        return match ? Math.max(max, parseInt(match[1])) : max;
-      }, 0);
-      msgId = maxId;
-      set({
-        dashboardId,
-        step: saved.step,
-        connectionString: saved.connectionString,
-        messages: saved.messages,
-        isProcessing: false,
-      });
-      // 恢复连接后自动加载库表树
-      if (saved.connectionString) {
-        useSchemaStore.getState().fetchTree(saved.connectionString);
+    // 先设置默认状态，然后异步加载
+    set({ ...getDefaultState(), dashboardId });
+    fetchChatState(dashboardId, 'etl').then(saved => {
+      if (saved) {
+        const maxId = (saved.messages || []).reduce((max: number, m: ChatMessage) => {
+          const match = m.id.match(/^msg-(\d+)$/);
+          return match ? Math.max(max, parseInt(match[1])) : max;
+        }, 0);
+        msgId = maxId;
+        set({
+          dashboardId,
+          step: (saved.step as EtlStep) || 1,
+          connectionString: saved.connectionString,
+          messages: saved.messages,
+          isProcessing: false,
+        });
+        if (saved.connectionString) {
+          useSchemaStore.getState().fetchTree(saved.connectionString);
+        }
       }
-    } else {
-      set({
-        ...getDefaultState(),
-        dashboardId,
-      });
-    }
+    }).catch(console.error);
   },
 
   sendMessage: (text: string) => {
@@ -342,7 +327,7 @@ export const useStore = create<AppState>((set, get) => ({
         const updatedMessages = [...get().messages];
         const errText = err instanceof Error ? err.message : '请求失败';
         updatedMessages.push(
-          sysMsg({ type: 'text', text: `对话服务暂不可用：${errText}\n\n请检查后端与 DeepSeek 配置。` }),
+          sysMsg({ type: 'text', text: `对话服务暂不可用：${errText}\n\n请检查后端与 LLM 配置。` }),
         );
         set({ messages: updatedMessages, isProcessing: false });
         persistState(get());

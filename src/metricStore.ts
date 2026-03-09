@@ -1,25 +1,13 @@
 import { create } from 'zustand';
 import type { Metric, ChartType } from './types';
-import { fetchMetricGenerate, fetchMetricQuery } from './api';
-
-const STORAGE_KEY = 'etl-metrics';
-
-function loadAll(): Metric[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-
-function saveAll(metrics: Metric[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(metrics));
-}
+import { fetchMetricGenerate, fetchMetricQuery, fetchMetrics, upsertMetricApi, deleteMetricApi, clearMetricsByDashboardApi } from './api';
 
 interface MetricState {
   metrics: Metric[];
   generating: boolean;
   error: string | null;
 
+  loadFromServer: () => Promise<void>;
   getByDashboard: (dashboardId: string) => Metric[];
   generateMetric: (opts: {
     dashboardId: string;
@@ -52,9 +40,18 @@ interface MetricState {
 }
 
 export const useMetricStore = create<MetricState>((set, get) => ({
-  metrics: loadAll(),
+  metrics: [],
   generating: false,
   error: null,
+
+  loadFromServer: async () => {
+    try {
+      const metrics = await fetchMetrics();
+      set({ metrics });
+    } catch (e) {
+      console.error('[MetricStore] loadFromServer failed:', e);
+    }
+  },
 
   getByDashboard: (dashboardId) => get().metrics.filter(m => m.dashboardId === dashboardId),
 
@@ -77,18 +74,12 @@ export const useMetricStore = create<MetricState>((set, get) => ({
       const queryResult = await fetchMetricQuery({ sql, connectionString });
       const metric: Metric = {
         id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        dashboardId,
-        name,
-        definition: description,
-        tables,
-        sql,
-        chartType,
-        data: queryResult.rows,
-        createdAt: Date.now(),
+        dashboardId, name, definition: description, tables, sql, chartType,
+        data: queryResult.rows, createdAt: Date.now(),
       };
       const updated = [metric, ...get().metrics];
-      saveAll(updated);
       set({ metrics: updated, generating: false });
+      upsertMetricApi(metric).catch(console.error);
     } catch (e) {
       const msg = e instanceof Error ? e.message : '查询失败';
       set({ generating: false, error: msg });
@@ -97,9 +88,8 @@ export const useMetricStore = create<MetricState>((set, get) => ({
   },
 
   deleteMetric: (id) => {
-    const updated = get().metrics.filter(m => m.id !== id);
-    saveAll(updated);
-    set({ metrics: updated });
+    set({ metrics: get().metrics.filter(m => m.id !== id) });
+    deleteMetricApi(id).catch(console.error);
   },
 
   refreshMetric: async (id, connectionString) => {
@@ -107,33 +97,27 @@ export const useMetricStore = create<MetricState>((set, get) => ({
     if (!metric) return;
     try {
       const result = await fetchMetricQuery({ sql: metric.sql, connectionString });
-      const updated = get().metrics.map(m =>
-        m.id === id ? { ...m, data: result.rows } : m
-      );
-      saveAll(updated);
+      const updated = get().metrics.map(m => m.id === id ? { ...m, data: result.rows } : m);
       set({ metrics: updated });
-    } catch (e) {
-      // silent fail for refresh
-    }
+      const refreshed = updated.find(m => m.id === id);
+      if (refreshed) upsertMetricApi(refreshed).catch(console.error);
+    } catch { /* silent */ }
   },
 
   clearByDashboard: (dashboardId) => {
-    const updated = get().metrics.filter(m => m.dashboardId !== dashboardId);
-    saveAll(updated);
-    set({ metrics: updated });
+    set({ metrics: get().metrics.filter(m => m.dashboardId !== dashboardId) });
+    clearMetricsByDashboardApi(dashboardId).catch(console.error);
   },
 
   updateMetric: (id, updates) => {
-    const updated = get().metrics.map(m =>
-      m.id === id ? { ...m, ...updates } : m
-    );
-    saveAll(updated);
+    const updated = get().metrics.map(m => m.id === id ? { ...m, ...updates } : m);
     set({ metrics: updated });
+    const m = updated.find(m => m.id === id);
+    if (m) upsertMetricApi(m).catch(console.error);
   },
 
-  findByName: (dashboardId, name) => {
-    return get().metrics.find(m => m.dashboardId === dashboardId && m.name === name);
-  },
+  findByName: (dashboardId, name) =>
+    get().metrics.find(m => m.dashboardId === dashboardId && m.name === name),
 
   reorderMetrics: (dashboardId, fromId, toId) => {
     if (fromId === toId) return;
@@ -146,7 +130,7 @@ export const useMetricStore = create<MetricState>((set, get) => ({
     const [moved] = dashMetrics.splice(fromIdx, 1);
     dashMetrics.splice(toIdx, 0, moved);
     const updated = [...dashMetrics, ...others];
-    saveAll(updated);
     set({ metrics: updated });
+    dashMetrics.forEach((m, i) => upsertMetricApi({ ...m, sortOrder: i } as any).catch(console.error));
   },
 }));

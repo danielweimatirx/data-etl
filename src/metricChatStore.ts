@@ -3,6 +3,7 @@ import type { ChatMessage } from './types';
 import { useMetricDefStore } from './metricDefStore';
 import { useDashboardStore } from './dashboardStore';
 import { useSchemaStore } from './schemaStore';
+import { fetchChatState, saveChatStateApi } from './api';
 
 let msgId = 0;
 const nextId = () => `mc-${++msgId}`;
@@ -14,20 +15,8 @@ function userMsg(text: string): ChatMessage {
   return { id: nextId(), role: 'user', contents: [{ type: 'text', text }], timestamp: Date.now() };
 }
 
-const STORAGE_PREFIX = 'etl-metric-chat-';
-
 function persistMessages(dashboardId: string, messages: ChatMessage[]) {
-  try {
-    localStorage.setItem(STORAGE_PREFIX + dashboardId, JSON.stringify(messages));
-  } catch { /* ignore */ }
-}
-
-function loadMessages(dashboardId: string): ChatMessage[] | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + dashboardId);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch { return null; }
+  saveChatStateApi(dashboardId, 'metric', { step: 1, connectionString: null, messages }).catch(console.error);
 }
 
 interface MetricChatState {
@@ -60,6 +49,20 @@ function getIntro(): ChatMessage {
   return { id: 'mc-intro', role: 'system', contents: [{ type: 'text', text: INTRO_TEXT }], timestamp: Date.now() };
 }
 
+function applyLoaded(dashboardId: string, saved: ChatMessage[] | null, setState: (s: Partial<MetricChatState>) => void) {
+  if (saved && saved.length > 0) {
+    let maxId = 0;
+    for (const m of saved) {
+      const n = parseInt(m.id.replace(/\D/g, ''), 10);
+      if (n > maxId) maxId = n;
+    }
+    msgId = maxId;
+    setState({ dashboardId, messages: saved, isProcessing: false });
+  } else {
+    setState({ dashboardId, messages: [getIntro()], isProcessing: false });
+  }
+}
+
 export const useMetricChatStore = create<MetricChatState>((set, get) => ({
   dashboardId: null,
   messages: [getIntro()],
@@ -68,19 +71,12 @@ export const useMetricChatStore = create<MetricChatState>((set, get) => ({
 
   loadForDashboard: (dashboardId: string) => {
     msgId = 0;
-    const saved = loadMessages(dashboardId);
-    if (saved && saved.length > 0) {
-      // restore msgId
-      let maxId = 0;
-      for (const m of saved) {
-        const n = parseInt(m.id.replace(/\D/g, ''), 10);
-        if (n > maxId) maxId = n;
+    set({ dashboardId, messages: [getIntro()], isProcessing: false });
+    fetchChatState(dashboardId, 'metric').then(data => {
+      if (data && data.messages && data.messages.length > 0) {
+        applyLoaded(dashboardId, data.messages, set);
       }
-      msgId = maxId;
-      set({ dashboardId, messages: saved, isProcessing: false });
-    } else {
-      set({ dashboardId, messages: [getIntro()], isProcessing: false });
-    }
+    }).catch(console.error);
   },
 
   setConnectionString: (cs) => set({ connectionString: cs }),
@@ -120,7 +116,6 @@ export const useMetricChatStore = create<MetricChatState>((set, get) => ({
         set({ messages: updatedMessages, isProcessing: false });
         if (get().dashboardId) persistMessages(get().dashboardId!, updatedMessages);
 
-        // 如果返回了确认的指标定义，自动保存
         if (data.metricDef) {
           const md = data.metricDef;
           const dbId = get().dashboardId || useDashboardStore.getState().activeDashboardId;
