@@ -1,31 +1,17 @@
 import { create } from 'zustand';
-import { fetchTableList } from './api';
+import { fetchTableList, fetchSchemaSelection, saveSchemaSelectionApi } from './api';
 import type { DatabaseTree } from './api';
 
-const STORAGE_PREFIX = 'etl-schema-sel-';
-
 function persistSelection(dashboardId: string, selected: Set<string>) {
-  try { localStorage.setItem(STORAGE_PREFIX + dashboardId, JSON.stringify([...selected])); } catch { /* */ }
-}
-function loadSelection(dashboardId: string): Set<string> | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + dashboardId);
-    if (!raw) return null;
-    return new Set(JSON.parse(raw) as string[]);
-  } catch { return null; }
+  saveSchemaSelectionApi(dashboardId, [...selected]).catch(console.error);
 }
 
 interface SchemaState {
   dashboardId: string | null;
-  /** 所有库表树 */
   tree: DatabaseTree[];
-  /** 是否正在加载 */
   loading: boolean;
-  /** 加载错误 */
   error: string | null;
-  /** 已选中的表（格式 db.table） */
   selectedTables: Set<string>;
-  /** 已展开的库 */
   expandedDbs: Set<string>;
 
   loadForDashboard: (dashboardId: string) => void;
@@ -48,8 +34,11 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
   expandedDbs: new Set(),
 
   loadForDashboard: (dashboardId: string) => {
-    const saved = loadSelection(dashboardId);
-    set({ dashboardId, selectedTables: saved || new Set() });
+    fetchSchemaSelection(dashboardId).then(arr => {
+      set({ dashboardId, selectedTables: arr ? new Set(arr) : new Set() });
+    }).catch(() => {
+      set({ dashboardId, selectedTables: new Set() });
+    });
   },
 
   fetchTree: async (connectionString: string) => {
@@ -65,8 +54,7 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
   toggleTable: (db, table) => {
     const key = `${db}.${table}`;
     const next = new Set(get().selectedTables);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
+    if (next.has(key)) next.delete(key); else next.add(key);
     set({ selectedTables: next });
     const { dashboardId } = get();
     if (dashboardId) persistSelection(dashboardId, next);
@@ -79,29 +67,22 @@ export const useSchemaStore = create<SchemaState>((set, get) => ({
     const allKeys = dbNode.tables.map(t => `${db}.${t}`);
     const allSelected = allKeys.every(k => selectedTables.has(k));
     const next = new Set(selectedTables);
-    if (allSelected) {
-      allKeys.forEach(k => next.delete(k));
-    } else {
-      allKeys.forEach(k => next.add(k));
-    }
+    if (allSelected) allKeys.forEach(k => next.delete(k));
+    else allKeys.forEach(k => next.add(k));
     set({ selectedTables: next });
     const { dashboardId } = get();
     if (dashboardId) persistSelection(dashboardId, next);
   },
 
-  toggleDb: (db) => {
-    get().toggleAllDbTables(db);
-  },
+  toggleDb: (db) => { get().toggleAllDbTables(db); },
 
   expandDb: (db) => {
-    const next = new Set(get().expandedDbs);
-    next.add(db);
+    const next = new Set(get().expandedDbs); next.add(db);
     set({ expandedDbs: next });
   },
 
   collapseDb: (db) => {
-    const next = new Set(get().expandedDbs);
-    next.delete(db);
+    const next = new Set(get().expandedDbs); next.delete(db);
     set({ expandedDbs: next });
   },
 

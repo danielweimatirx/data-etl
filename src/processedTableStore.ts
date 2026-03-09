@@ -1,21 +1,10 @@
 import { create } from 'zustand';
 import type { ProcessedTable } from './types';
-
-const STORAGE_KEY = 'etl-processed-tables';
-
-function loadAll(): ProcessedTable[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-
-function saveAll(tables: ProcessedTable[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(tables));
-}
+import { fetchProcessedTables, upsertProcessedTableApi, deleteProcessedTableApi, clearProcessedTablesByDashboardApi } from './api';
 
 interface ProcessedTableState {
   tables: ProcessedTable[];
+  loadFromServer: () => Promise<void>;
   getByDashboard: (dashboardId: string) => ProcessedTable[];
   addOrUpdate: (entry: Omit<ProcessedTable, 'id'>) => void;
   remove: (id: string) => void;
@@ -23,7 +12,16 @@ interface ProcessedTableState {
 }
 
 export const useProcessedTableStore = create<ProcessedTableState>((set, get) => ({
-  tables: loadAll(),
+  tables: [],
+
+  loadFromServer: async () => {
+    try {
+      const tables = await fetchProcessedTables();
+      set({ tables });
+    } catch (e) {
+      console.error('[ProcessedTableStore] loadFromServer failed:', e);
+    }
+  },
 
   getByDashboard: (dashboardId) =>
     get().tables.filter(t => t.dashboardId === dashboardId),
@@ -32,26 +30,25 @@ export const useProcessedTableStore = create<ProcessedTableState>((set, get) => 
     const id = `${entry.database}.${entry.table}`;
     const existing = get().tables;
     const idx = existing.findIndex(t => t.id === id && t.dashboardId === entry.dashboardId);
+    const record = { ...entry, id, processedAt: Date.now() } as ProcessedTable;
     let updated: ProcessedTable[];
     if (idx >= 0) {
       updated = [...existing];
-      updated[idx] = { ...updated[idx], ...entry, id, processedAt: Date.now() };
+      updated[idx] = { ...updated[idx], ...record };
     } else {
-      updated = [{ ...entry, id, processedAt: Date.now() }, ...existing];
+      updated = [record, ...existing];
     }
-    saveAll(updated);
     set({ tables: updated });
+    upsertProcessedTableApi(record).catch(console.error);
   },
 
   remove: (id) => {
-    const updated = get().tables.filter(t => t.id !== id);
-    saveAll(updated);
-    set({ tables: updated });
+    set({ tables: get().tables.filter(t => t.id !== id) });
+    deleteProcessedTableApi(id).catch(console.error);
   },
 
   clearByDashboard: (dashboardId) => {
-    const updated = get().tables.filter(t => t.dashboardId !== dashboardId);
-    saveAll(updated);
-    set({ tables: updated });
+    set({ tables: get().tables.filter(t => t.dashboardId !== dashboardId) });
+    clearProcessedTablesByDashboardApi(dashboardId).catch(console.error);
   },
 }));
